@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -37,8 +38,28 @@ impl MockHooks {
     }
 }
 
+// produces a sequence of loopback addresses
+// 127.0.0.1 -> ... 127.0.0.255
+// 127.0.1.0 -> ... 127.0.1.255
+// ...
+// 127.255....
+fn next_loopback_address() -> String {
+    static COUNTER: OnceLock<AtomicUsize> = OnceLock::new();
+    let counter = COUNTER.get_or_init(|| AtomicUsize::new(1));
+    // Increment the counter
+    let val = counter.fetch_add(1, Ordering::Relaxed);
+    let d = val % 256;
+    let c = (val >> 8) % 256;
+    let b = (val >> 16) % 256;
+
+    if b == 255 && c == 255 && d == 255 {
+        panic!("exhausted 127/8 loopback. such coverage.");
+    }
+    format!("127.{b}.{c}.{d}")
+}
+
 /// Spawn a mock backend that echoes the model name and a counter.
-async fn spawn_mock_backend(port: u16) -> (SocketAddr, Arc<AtomicUsize>) {
+async fn spawn_mock_backend() -> (SocketAddr, Arc<AtomicUsize>) {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
 
@@ -61,9 +82,10 @@ async fn spawn_mock_backend(port: u16) -> (SocketAddr, Arc<AtomicUsize>) {
         }),
     );
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .unwrap();
+    // bind to the next address in loopback, random port.
+    let bind_host = next_loopback_address();
+    println!("{bind_host}");
+    let listener = TcpListener::bind(format!("{bind_host}:0")).await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
@@ -78,8 +100,8 @@ async fn spawn_mock_backend(port: u16) -> (SocketAddr, Arc<AtomicUsize>) {
 
 /// Build a test config with two models.
 fn test_config(
-    model_a_port: u16,
-    model_b_port: u16,
+    model_a_dest: &SocketAddr,
+    model_b_dest: &SocketAddr,
     hooks_a: &MockHooks,
     hooks_b: &MockHooks,
 ) -> Config {
@@ -87,7 +109,8 @@ fn test_config(
     models.insert(
         "model-a".to_string(),
         ModelConfig {
-            port: model_a_port,
+            host: model_a_dest.ip().to_string(),
+            port: model_a_dest.port(),
             wake: hooks_a.wake.clone(),
             sleep: hooks_a.sleep.clone(),
             alive: hooks_a.alive.clone(),
@@ -96,7 +119,8 @@ fn test_config(
     models.insert(
         "model-b".to_string(),
         ModelConfig {
-            port: model_b_port,
+            host: model_b_dest.ip().to_string(),
+            port: model_b_dest.port(),
             wake: hooks_b.wake.clone(),
             sleep: hooks_b.sleep.clone(),
             alive: hooks_b.alive.clone(),
@@ -145,10 +169,10 @@ async fn test_single_model_request() {
     let hooks_a = MockHooks::new(0, 0); // instant wake/sleep
     let hooks_b = MockHooks::new(0, 0);
 
-    let (addr_a, counter_a) = spawn_mock_backend(0).await;
-    let (addr_b, _counter_b) = spawn_mock_backend(0).await;
+    let (addr_a, counter_a) = spawn_mock_backend().await;
+    let (addr_b, _counter_b) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _switcher) = llmux::build_app(config).await.unwrap();
 
     let (status, body) = chat_request(&app, "model-a").await;
@@ -163,10 +187,10 @@ async fn test_model_switch() {
     let hooks_a = MockHooks::new(10, 10); // 10ms wake/sleep
     let hooks_b = MockHooks::new(10, 10);
 
-    let (addr_a, counter_a) = spawn_mock_backend(0).await;
-    let (addr_b, counter_b) = spawn_mock_backend(0).await;
+    let (addr_a, counter_a) = spawn_mock_backend().await;
+    let (addr_b, counter_b) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _switcher) = llmux::build_app(config).await.unwrap();
 
     // First request: model-a (cold start)
@@ -189,10 +213,10 @@ async fn test_same_model_no_switch() {
     let hooks_a = MockHooks::new(10, 10);
     let hooks_b = MockHooks::new(10, 10);
 
-    let (addr_a, counter_a) = spawn_mock_backend(0).await;
-    let (addr_b, counter_b) = spawn_mock_backend(0).await;
+    let (addr_a, counter_a) = spawn_mock_backend().await;
+    let (addr_b, counter_b) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _switcher) = llmux::build_app(config).await.unwrap();
 
     for _ in 0..5 {
@@ -211,10 +235,10 @@ async fn test_unknown_model() {
     let hooks_a = MockHooks::new(0, 0);
     let hooks_b = MockHooks::new(0, 0);
 
-    let (addr_a, _) = spawn_mock_backend(0).await;
-    let (addr_b, _) = spawn_mock_backend(0).await;
+    let (addr_a, _) = spawn_mock_backend().await;
+    let (addr_b, _) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _) = llmux::build_app(config).await.unwrap();
 
     let (status, body) = chat_request(&app, "nonexistent").await;
@@ -233,10 +257,10 @@ async fn test_switch_timing() {
     let hooks_a = MockHooks::new(100, 50); // 100ms wake, 50ms sleep
     let hooks_b = MockHooks::new(100, 50);
 
-    let (addr_a, _) = spawn_mock_backend(0).await;
-    let (addr_b, _) = spawn_mock_backend(0).await;
+    let (addr_a, _) = spawn_mock_backend().await;
+    let (addr_b, _) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _switcher) = llmux::build_app(config).await.unwrap();
 
     // First request: cold start wake for model-a (~100ms)
@@ -268,10 +292,10 @@ async fn test_concurrent_same_model() {
     let hooks_a = MockHooks::new(50, 10);
     let hooks_b = MockHooks::new(50, 10);
 
-    let (addr_a, counter_a) = spawn_mock_backend(0).await;
-    let (addr_b, _) = spawn_mock_backend(0).await;
+    let (addr_a, counter_a) = spawn_mock_backend().await;
+    let (addr_b, _) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _) = llmux::build_app(config).await.unwrap();
 
     // Send 10 concurrent requests for model-a
@@ -298,10 +322,10 @@ async fn test_concurrent_different_models() {
     let hooks_a = MockHooks::new(50, 10);
     let hooks_b = MockHooks::new(50, 10);
 
-    let (addr_a, counter_a) = spawn_mock_backend(0).await;
-    let (addr_b, counter_b) = spawn_mock_backend(0).await;
+    let (addr_a, counter_a) = spawn_mock_backend().await;
+    let (addr_b, counter_b) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _) = llmux::build_app(config).await.unwrap();
 
     // Send requests for both models concurrently
@@ -335,10 +359,10 @@ async fn test_list_models() {
     let hooks_a = MockHooks::new(0, 0);
     let hooks_b = MockHooks::new(0, 0);
 
-    let (addr_a, _) = spawn_mock_backend(0).await;
-    let (addr_b, _) = spawn_mock_backend(0).await;
+    let (addr_a, _) = spawn_mock_backend().await;
+    let (addr_b, _) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, _) = llmux::build_app(config).await.unwrap();
 
     let req = Request::builder()
@@ -374,10 +398,10 @@ async fn test_switch_cost_tracking() {
     let hooks_a = MockHooks::new(50, 20); // 50ms wake, 20ms sleep
     let hooks_b = MockHooks::new(80, 20); // 80ms wake, 20ms sleep
 
-    let (addr_a, _) = spawn_mock_backend(0).await;
-    let (addr_b, _) = spawn_mock_backend(0).await;
+    let (addr_a, _) = spawn_mock_backend().await;
+    let (addr_b, _) = spawn_mock_backend().await;
 
-    let config = test_config(addr_a.port(), addr_b.port(), &hooks_a, &hooks_b);
+    let config = test_config(&addr_a, &addr_b, &hooks_a, &hooks_b);
     let (app, switcher) = llmux::build_app(config).await.unwrap();
 
     // No costs recorded yet

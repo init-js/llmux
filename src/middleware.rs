@@ -142,9 +142,9 @@ where
             .record(request_start.elapsed().as_secs_f64());
 
             // Set proxy target so the proxy handler knows where to forward
-            let port = switcher.model_port(&model).unwrap();
+            let (host, port) = switcher.model_dest(&model).unwrap();
             let mut parts = parts;
-            parts.extensions.insert(ProxyTarget { port });
+            parts.extensions.insert(ProxyTarget { host, port });
 
             let req = Request::from_parts(parts, Body::from(body_bytes));
 

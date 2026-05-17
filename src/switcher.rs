@@ -134,8 +134,8 @@ impl ModelSwitcher {
         self.inner.model_states.contains_key(model)
     }
 
-    pub fn model_port(&self, model: &str) -> Option<u16> {
-        self.inner.hooks.model_port(model)
+    pub fn model_dest(&self, model: &str) -> Option<(String, u16)> {
+        self.inner.hooks.model_dest(model)
     }
 
     pub fn in_flight_count(&self, model: &str) -> usize {
@@ -805,6 +805,7 @@ mod tests {
             "model-a".to_string(),
             ModelConfig {
                 port: 8001,
+                host: "localhost".to_string(),
                 wake: "true".to_string(),
                 sleep: "true".to_string(),
                 alive: "true".to_string(),
@@ -814,6 +815,7 @@ mod tests {
             "model-b".to_string(),
             ModelConfig {
                 port: 8002,
+                host: "host8002".to_string(),
                 wake: "true".to_string(),
                 sleep: "true".to_string(),
                 alive: "true".to_string(),
@@ -877,14 +879,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_model_port() {
+    async fn test_model_dest() {
         let hooks = make_test_hooks();
         let policy = Box::new(FifoPolicy::default());
         let switcher = ModelSwitcher::new(hooks, policy);
 
-        assert_eq!(switcher.model_port("model-a"), Some(8001));
-        assert_eq!(switcher.model_port("model-b"), Some(8002));
-        assert_eq!(switcher.model_port("model-c"), None);
+        assert_eq!(
+            switcher.model_dest("model-a"),
+            Some(("localhost".to_string(), 8001))
+        );
+        assert_eq!(
+            switcher.model_dest("model-b"),
+            Some(("host8002".to_string(), 8002))
+        );
+        assert_eq!(switcher.model_dest("model-c"), None);
+    }
+
+    #[tokio::test]
+    async fn test_model_jpmp() {
+        let hooks = make_test_hooks();
+        let policy = Box::new(FifoPolicy::default());
+        let switcher = ModelSwitcher::new(hooks, policy);
+
+        assert_eq!(
+            switcher.model_dest("model-a"),
+            Some(("localhost".to_string(), 8001))
+        );
+        assert_eq!(
+            switcher.model_dest("model-b"),
+            Some(("host8002".to_string(), 8002))
+        );
+        assert_eq!(switcher.model_dest("model-c"), None);
     }
 
     #[tokio::test]

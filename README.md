@@ -36,9 +36,10 @@ models:
 
   mistral:
     port: 8002
+    host: 192.168.10.2
     wake: ./scripts/wake-mistral.sh
     sleep: ./scripts/sleep-mistral.sh
-    alive: curl -sf http://localhost:8002/health
+    alive: curl -sf http://192.168.10.2:8002/health
 
 port: 3000
 ```
@@ -63,15 +64,22 @@ run `sleep-llama.sh`, then `wake-mistral.sh`, and proxy the request through.
 ## How it works
 
 ```
-Client requests
-     |
-+---------+
-|  llmux  |   port 3000 (OpenAI-compatible proxy)
-+---------+
- /         \
-[8001]    [8002]
- llama     mistral
-(active)   (sleeping)
+Client Requests
+    │
+    ▼
+┌──────────────────────────────────────┐
+│           llmux (localhost:3000)     │
+│     OpenAI-compatible proxy/router   │
+└───────────────┬──────────────────────┘
+                │ forwarded
+      ┌─────────┴─────────┐
+      │                   │
+      ▼                   ▼
+┌────────────────┐  ┌────────────────────┐
+│ llama          │  │ mistral            │
+│ localhost:8001 │  │ 192.168.10.2:8002  │
+│ (active)       │  │ (sleeping)         │
+└────────────────┘  └────────────────────┘
 ```
 
 1. **Middleware** extracts the `model` field from the request JSON body
@@ -79,14 +87,14 @@ Client requests
    - Drains in-flight requests for the current model
    - Runs the **sleep** hook on the current model
    - Runs the **wake** hook on the target model
-3. **Proxy** forwards the request to `localhost:<model_port>`
+3. **Proxy** forwards the request to `<model_host>:<model_port>` (model host defaults to the same host as llmux).
 4. In-flight tracking uses RAII guards that hold through streaming responses
 
 ## Configuration
 
 ### Models
 
-Each model needs a `port` and three hooks:
+Each model needs a `port`, an optional `host` (address), and three hooks:
 
 ```yaml
 models:
@@ -109,8 +117,14 @@ models:
       curl -sf http://localhost:8001/health
 ```
 
-Hooks are executed via `sh -c` with `LLMUX_MODEL` set in the environment.
-They can be inline scripts (YAML `|` syntax) or paths to executables.
+Hooks are executed via `sh -c` with an environment that includes:
+  - the environment from the llmux process
+  - configuration parameters of the model being awoken/evicted:
+    - `LLMUX_MODEL` the name of the model (i.e. the key under `models`)
+    - `LLMUX_DEST_HOST` the host address (or hostname) on which the inference server is listening
+    - `LLMUX_DEST_PORT` the tcp port address on which the inference server is listening
+    
+The hooks can be inline scripts (YAML `|` syntax) or paths to executables.
 
 ### Policy
 
