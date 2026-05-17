@@ -109,7 +109,12 @@ models:
       curl -sf http://localhost:8001/health
 ```
 
-Hooks are executed via `sh -c` with `LLMUX_MODEL` set in the environment.
+Hooks are executed via `sh -c` with an environment that includes:
+  - the environment from the llmux process
+  - configuration parameters of the model being awoken/evicted:
+    - `LLMUX_MODEL` the name of the model (i.e. the key under `models`)
+    - `LLMUX_DEST_PORT` the assigned port number for the model
+
 They can be inline scripts (YAML `|` syntax) or paths to executables.
 
 ### Policy
